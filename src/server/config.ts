@@ -26,10 +26,12 @@ export interface AppConfig {
   prices: boolean;
 }
 
-export const REAL_VARS = ["T3N_API_KEY", "T3N_AGENT_API_KEY", "T3N_AGENT_DID", "T3N_CONTRACT", "SIGNGUARD_KEY_SECRET"] as const;
+export const REAL_VARS_SELF = ["T3N_API_KEY", "T3N_ORG_DID", "T3N_CONTRACT", "SIGNGUARD_KEY_SECRET"] as const;
+export const REAL_VARS_DELEGATED = ["T3N_API_KEY", "T3N_AGENT_API_KEY", "T3N_AGENT_DID", "T3N_CONTRACT", "SIGNGUARD_KEY_SECRET"] as const;
 
 export function appConfig(): AppConfig {
-  const missing = REAL_VARS.filter((k) => !process.env[k]);
+  const vars = process.env.T3N_USER_MODE === "delegated" ? REAL_VARS_DELEGATED : REAL_VARS_SELF;
+  const missing = vars.filter((k) => !process.env[k]);
   const forced = process.env.SIGNGUARD_MODE;
   const mode = forced === "mock" ? "mock" : forced === "real" || missing.length === 0 ? "real" : "mock";
   if (mode === "real" && missing.length) throw new Error(`SIGNGUARD_MODE=real but missing: ${missing.join(", ")}`);

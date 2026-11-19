@@ -7,3 +7,12 @@ data/
 contracts/**/target/
 *.wasm
 .DS_Store
+
+# secrets (real values live in ~/.secrets/terminal3/t3.env, never in the repo)
+t3.env
+.secrets/
+secrets/
+*.pem
+*.key
+identities.json
+sponsor-budget.json

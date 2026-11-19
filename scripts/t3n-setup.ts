@@ -3,11 +3,13 @@
  * because creating an org is NOT idempotent (docs). Secrets go straight into
  * ~/.secrets/terminal3/t3.env (chmod 600) and are never printed.
  *
- *   npm run t3n:setup -- --org        create the organisation (once)
+ *   npm run t3n:setup -- --org        create the organisation (once; reuses an existing one)
+ *   npm run t3n:setup -- --register   register contracts/.../signguard_policy.wasm + private `rules` map
+ *   npm run t3n:setup -- --status     show what's configured (default)
+ *
+ * Only needed for T3N_USER_MODE=delegated (not the default "self" mode):
  *   npm run t3n:setup -- --agent      create the SignGuard agent (once)
  *   npm run t3n:setup -- --fund 50    move 50 test credits to the agent
- *   npm run t3n:setup -- --register   build artefact -> register contract + private map
- *   npm run t3n:setup -- --status     show what's configured
  */
 import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
@@ -70,8 +72,17 @@ if (has("--register")) {
   const tenant = new TenantClient({ t3n, baseUrl: getNodeUrl(), tenantDid });
   await tenant.tenant.me();
   const contractName = `z:${tenantDid.slice("did:t3n:".length)}:${TAIL}`;
-  const reg = await tenant.contracts.register({ tail: TAIL, version: VERSION, wasm: await readFile(WASM) });
-  const id = reg.contract_id;
+  let id: number;
+  try {
+    const reg = await tenant.contracts.register({ tail: TAIL, version: VERSION, wasm: await readFile(WASM) });
+    id = reg.contract_id; // returned only here — there is no lookup call later
+  } catch (e) {
+    if (/not higher than current version|already registered/i.test(String((e as Error).message))) {
+      console.log(`${contractName} v${VERSION} is already registered. To ship a new build, set SIGNGUARD_CONTRACT_VERSION higher (e.g. 0.1.1).`);
+      process.exit(0);
+    }
+    throw e;
+  }
   console.log(`Registered ${contractName} v${VERSION} as contract id ${id}`);
   storeSecret("T3N_CONTRACT", contractName);
   storeSecret(`T3N_CONTRACT_ID_${VERSION.replace(/\W/g, "_")}`, String(id));
@@ -87,7 +98,7 @@ if (has("--register")) {
 }
 
 if (has("--status") || args.length === 0) {
-  for (const k of ["T3N_ORG_DID", "T3N_AGENT_DID", "T3N_AGENT_API_KEY", "T3N_CONTRACT", "SIGNGUARD_KEY_SECRET", "SIGNGUARD_ADMIN_TOKEN"]) {
+  for (const k of ["T3N_ORG_DID", "T3N_CONTRACT", "T3N_AGENT_DID", "T3N_AGENT_API_KEY", "SIGNGUARD_KEY_SECRET", "SIGNGUARD_ADMIN_TOKEN"]) {
     const v = process.env[k];
     console.log(`${k.padEnd(22)} ${v ? (/KEY|SECRET|TOKEN/.test(k) ? "set (hidden)" : v) : "—"}`);
   }

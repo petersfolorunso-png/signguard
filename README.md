@@ -65,12 +65,22 @@ The policy returns only **allow / warn / block** plus reason codes
 * **TEE policy contract** — `contracts/signguard-policy` (Rust, WASM component). It
   imports only `tenant-context`, `logging` and `kv-store`, so rules cannot leave the
   enclave. Rules are keyed by `calling_user_did()`, never by a DID in the input.
-* **Scoped delegation** — the user grants the agent exactly one function (`check`);
-  `set-rules` / `forget` refuse delegated calls.
-* **Audit log + traction metric** — each check is an agent call *on behalf of* the
-  user DID, paid in T3 credits and recorded in the org activity log
-  (`actor = agent`, `on_behalf_of = user`). The DID export merges that log with
-  local stats for the submission form.
+* **Credits (default `T3N_USER_MODE=self`)** — a brand-new DID has **0 credits**
+  (verified on testnet). So when a visitor first arrives, the org admin adds their
+  DID to the SignGuard organisation (`addOrganisationMember`) and sponsors a few
+  credits (`fundAgent`, which accepts human org members). The user's own session
+  then calls `set-rules` and `check` as self calls (no grant needed), so **each
+  user DID burns its own credits** — exactly what the grant measures. Caps:
+  `SIGNGUARD_USER_CREDITS` (5), `SIGNGUARD_USER_CREDIT_CAP` (25 per user),
+  `SIGNGUARD_DAILY_CREDIT_BUDGET` (1000/day). On `InsufficientCredit` the adapter
+  tops up once within the caps and retries.
+* **Delegated mode (optional, `T3N_USER_MODE=delegated`)** — the user grants an
+  org-owned SignGuard agent exactly one function (`check`) and the agent pays.
+  Not the default: the grant is a `tee:user` call that testnet charged ~30 credits
+  and refused for a 0-credit DID with "required=10,000 credits available".
+* **Audit log** — every check lands in the org activity log (labels
+  `sg_op=check, verdict, hits`); as org admin, the export reads all members' rows
+  and merges them with local stats for the submission form.
 
 The policy logic exists twice — `src/core/rules.ts` (mock mode, tests) and
 `contracts/signguard-policy/src/logic.rs` (the TEE) — and **both are tested against the
@@ -88,7 +98,7 @@ same vectors** in `test-vectors/policy.json`.
 
 ```bash
 npm install
-npm test               # 54 TS tests (decoder, policy vectors, API)
+npm test               # 58 TS tests (decoder, policy vectors, API, real adapter w/ mocked SDK)
 npm run test:contract  # Rust TEE logic against the same vectors
 npm run dev            # API :8787 + web :5173 (mock T3N)
 # or production-style:
@@ -110,9 +120,11 @@ tx-hash lookups.
    ```
 2. `npm run t3n:smoke` — prints your developer DID and credit balance.
 3. `npm run build:contract` (needs `rustup target add wasm32-wasip2`).
-4. `npm run t3n:setup -- --org --agent --fund 50 --register` — creates the org and the
-   SignGuard agent, funds it, registers `z:<tid>:signguard` and its private `rules` map.
-   Secrets are written straight to the env file and never printed.
+4. `npm run t3n:setup -- --org --register` — creates (or reuses) the SignGuard org and
+   registers `z:<tid>:signguard` + its private `rules` map. Guarded: it won't create a
+   second org if `T3N_ORG_DID` is set or you already belong to one, and re-registering
+   the same version is a no-op. Secrets go straight to the env file, never printed.
+   (`--agent --fund N` only for delegated mode.)
 5. `npm start` — the log shows `mode=real`; the UI pill turns “T3N testnet”.
 6. `npm run export:dids` — CSV/JSON of every DID for the DoraHacks form.
 
