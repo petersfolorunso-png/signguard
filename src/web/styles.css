@@ -148,3 +148,28 @@ textarea:focus, input:focus, select:focus { border-color: rgba(124, 247, 196, 0.
   .adv { grid-template-columns: 1fr; }
   .did-chip { display: none; }
 }
+
+/* ---- email sign-in ---- */
+.signin-btn { background: linear-gradient(90deg, #7cf7c4, #6aa8ff); color: #07080c; border: 0; border-radius: 999px; padding: 7px 14px; font-weight: 700; cursor: pointer; }
+.chip-x { background: none; border: 0; color: inherit; opacity: .6; cursor: pointer; font-size: 16px; line-height: 1; padding: 0 0 0 6px; }
+.chip-x:hover { opacity: 1; }
+.welcome { margin: 0 0 12px; }
+.preview-cta { display: flex; flex-direction: column; gap: 10px; background: rgba(106, 168, 255, .08); border: 1px solid rgba(106, 168, 255, .35); border-radius: 12px; padding: 12px 14px; margin: 10px 0 14px; font-size: 14px; }
+.primary.small { padding: 10px 14px; font-size: 14px; margin: 0; }
+.sheet-bg { position: fixed; inset: 0; background: rgba(4, 5, 9, .72); backdrop-filter: blur(6px); display: flex; align-items: flex-end; justify-content: center; z-index: 50; animation: fade .15s ease; }
+.sheet { position: relative; width: 100%; max-width: 440px; background: #10131c; border: 1px solid rgba(255,255,255,.08); border-radius: 20px 20px 0 0; padding: 22px 20px 26px; box-shadow: 0 -10px 40px rgba(0,0,0,.5); animation: rise .2s ease; }
+@media (min-width: 640px) { .sheet-bg { align-items: center; } .sheet { border-radius: 20px; } }
+.sheet h2 { margin: 6px 0 6px; }
+.sheet form { display: flex; flex-direction: column; gap: 10px; }
+.sheet-x { position: absolute; top: 10px; right: 12px; background: none; border: 0; color: #9aa3b5; font-size: 24px; cursor: pointer; }
+.sheet-steps { display: flex; gap: 8px; font-size: 12px; color: #6b7385; }
+.sheet-steps .on { color: #7cf7c4; font-weight: 700; }
+.sheet-steps .done { color: #9aa3b5; }
+.big-input { width: 100%; box-sizing: border-box; font-size: 18px; padding: 14px 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,.12); background: #0a0c12; color: #eef1f7; }
+.big-input:focus { outline: 2px solid #6aa8ff; border-color: transparent; }
+.big-input.code { letter-spacing: .4em; text-align: center; font-variant-numeric: tabular-nums; font-size: 24px; }
+.demo-code { background: rgba(124, 247, 196, .08); border: 1px dashed rgba(124, 247, 196, .5); border-radius: 10px; padding: 8px 12px; font-size: 14px; }
+.demo-code b { letter-spacing: .2em; font-size: 16px; }
+.sheet-links { display: flex; justify-content: space-between; }
+@keyframes fade { from { opacity: 0 } to { opacity: 1 } }
+@keyframes rise { from { transform: translateY(20px); opacity: 0 } to { transform: none; opacity: 1 } }

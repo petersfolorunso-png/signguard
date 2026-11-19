@@ -49,17 +49,19 @@ The policy returns only **allow / warn / block** plus reason codes
 ```
  browser ──paste──▶ SignGuard server ──decode──▶ TxFacts (no secrets)
                          │
-   user's did:t3n  ◀─────┤ 1. first visit: a fresh identity key signs in to T3N → did:t3n
-   (own T3N vault)       │ 2. "Seal rules": self call set_rules → private map z:<tid>:rules
-                         │    + member delegation: user grants the SignGuard agent `check` only
-                         │ 3. every check: agent invoke(check, pii_did = user DID)
+   user's did:t3n  ◀─────┤ 1. sign in: email → code (T3N email-OTP) → did:t3n, user-upsert
+   (own T3N vault)       │    registers it, org adds it + sponsors credits, device key linked
+                         │ 2. "Seal rules": self call set-rules → private map z:<tid>:rules
+                         │ 3. every check: self call check (billed to + logged for the user DID)
                          ▼
           TEE contract z:<tid>:signguard (Rust → WASM, tenant-base world, no HTTP)
           reads the caller's rules, returns {verdict, codes}; labels the call
           {sg_op: check, verdict, hits} in T3N's tamper-evident activity log
 ```
 
-* **`did:t3n` per user** — every visitor gets their own T3N identity on first visit.
+* **`did:t3n` per user, via email code** — see "Sign-in" below. Signed-out visitors
+  still get an instant *local preview* of any tx (default rules, no T3N call, not
+  counted); signing in runs it in the enclave against their own rules.
 * **Private vault** — rules are stored by the user's own session in a private map that
   only the SignGuard contract can read (`readers/writers: only [contract_id]`).
 * **TEE policy contract** — `contracts/signguard-policy` (Rust, WASM component). It
@@ -75,9 +77,7 @@ The policy returns only **allow / warn / block** plus reason codes
   `SIGNGUARD_DAILY_CREDIT_BUDGET` (1500/day). On `InsufficientCredit` the adapter
   tops up once within the caps and retries. Users who never customise rules skip
   `set-rules` entirely (the TEE falls back to defaults).
-  **Open issue:** T3N only lets an org add *registered* users (email-verified via
-  `user-upsert`), so wallet-only burner DIDs can't be sponsored yet — see
-  "Measured costs & onboarding" below.
+  T3N only lets an org add *registered* users, which is why sign-in is by email.
 * **Delegated mode (optional, `T3N_USER_MODE=delegated`)** — the user grants an
   org-owned SignGuard agent exactly one function (`check`) and the agent pays.
   Not the default: the grant is a `tee:user` call that testnet charged ~30 credits
@@ -89,6 +89,55 @@ The policy returns only **allow / warn / block** plus reason codes
 The policy logic exists twice — `src/core/rules.ts` (mock mode, tests) and
 `contracts/signguard-policy/src/logic.rs` (the TEE) — and **both are tested against the
 same vectors** in `test-vectors/policy.json`.
+
+## Sign-in: enter email, enter code, done
+
+T3N's intended onboarding (SDK `createEmailOtpAuthInput` + `submitUserInput`):
+
+1. `POST /api/auth/email/start {email}` — the server opens a T3N client and starts
+   `authenticate(createEmailOtpAuthInput({email, getOtpCode}))`. T3N emails the code;
+   the SDK then waits in `getOtpCode`, which we park (10 min, in memory) under a
+   random `pendingId`.
+2. `POST /api/auth/email/verify {pendingId, code}` — we hand the code to the parked
+   login and get the user's DID (keyed on the email: same email → same DID). Then:
+   * `submitUserInput({profile: {}, organisationDid})` — **user-upsert**: registers the
+     profile. Per the SDK docs, an email-OTP login already proves the email, so we do
+     *not* call `otpRequest` (that would send a second email).
+   * org admin `addOrganisationMember` + `fundAgent(SIGNGUARD_USER_CREDITS)` (once per
+     DID, within caps; "already a member" is tolerated).
+   * `addAuthMethod(createEthAuthInput(deviceKey))` — links a throwaway device key to
+     the DID so the browser resumes later without another email. If linking fails,
+     the session still works until it expires, then asks for a new code.
+3. The browser keeps only an opaque handle. **SignGuard never stores the email**
+   (it passes through to T3N; tests assert it is not written to disk).
+
+The SDK login is single-shot: a wrong code ends it and the UI offers "Send a new
+code". Code sends are rate-limited (3 per address and 20 per IP per 10 min) on top
+of T3N's own resend cooldown (`OtpRateLimitedError` → "try again in Ns").
+
+**Does registration cost credits a new user lacks?** Evidence says no: on testnet a
+fresh 0-credit DID's `user-upsert` call ran the contract and came back with the
+contract's own `email_not_verified` refusal, not `InsufficientCredit` (whereas a
+`tee:user` delegation read is refused up front for 0 credits), and its balance stayed
+0. The org can't fund first anyway — `addOrganisationMember` refuses non-users — so
+the order is: register (free) → add to org → fund. If T3N ever does charge for it,
+the verify step fails with a clear 503 and sponsors nothing. Confirm in the first
+live test (below).
+
+**Mock mode** defaults to one-click anonymous DIDs for demos. `SIGNGUARD_LOGIN=email`
+simulates the email flow: nothing is sent, the code is shown on screen
+("Demo code: 123456"), and the same email maps to the same mock DID.
+
+### First live test (needs Mari's OK + a chosen inbox)
+
+With the real env loaded (`npm run build && npm start`, log shows `mode=real login=email`):
+open the app → "Try a scary tx" (preview) → "Sign in & check privately" → enter the
+chosen inbox → type the emailed code. Expect: welcome banner with "100 free T3
+credits", the verdict re-runs as "Verdict from T3N enclave", and `/api/status` notes
+show the org/contract. Then seal custom rules once and run one more check. Costs:
+≈ 100 credits sponsored + whatever the user spends (≈ 90 rules + ≈ 40 per check)
+from the user's sponsorship; registration itself should cost 0. Verify afterwards:
+`npm run export:dids` lists the DID, and the org activity log has the `check` rows.
 
 ## Measured costs & onboarding (testnet, 2026-11-19)
 
@@ -102,8 +151,8 @@ same vectors** in `test-vectors/policy.json`.
 
 A fresh wallet-key DID authenticates for free but has 0 credits, and
 `addOrganisationMember` refuses it ("can't attribute a non-user") until it is a
-registered user (email-verified `user-upsert`). Options under evaluation: email-OTP
-sign-in per user, a per-visitor org-owned agent DID, or T3-sponsored onboarding.
+registered user (email-verified `user-upsert`) — hence email sign-in. A 0-credit
+DID's `user-upsert` attempt was not refused for credits (see "Sign-in").
 `npm run t3n:measure -- --yes` re-measures set-rules/check costs on the developer DID.
 
 ## Privacy model
@@ -112,15 +161,17 @@ sign-in per user, a per-visitor org-owned agent DID, or T3-sponsored onboarding.
 * Pasted transactions are decoded in memory and not stored.
 * Rules: in real mode the server passes them through to the user's T3N vault and keeps no copy. The browser keeps a device-only copy so the editor can show them.
 * Stats store only DIDs (pseudonymous), verdicts and tx kinds — no tx data, no IPs. The public dashboard shows truncated DIDs; the full list is behind `SIGNGUARD_ADMIN_TOKEN`.
-* **v1 limitation (honest):** to keep the “1-minute, no wallet” try-out, each browser's T3N *identity* key is a throwaway key generated and held server-side, encrypted at rest (AES-256-GCM). It controls no funds, and the contract exposes no “read rules” function, but the operator could in principle act as that identity. v2 moves the key into the browser (or SIWE with the user's own wallet).
+* Email: used only to sign in with Terminal 3 (T3N keeps it on the user's profile as their verified contact). SignGuard's server never writes it to disk or logs; the pending login lives in memory for ≤10 minutes.
+* **v1 limitation (honest):** so a visitor doesn't need a new email code every visit, a throwaway *device* key is linked to their DID, generated and held server-side, encrypted at rest (AES-256-GCM). It controls no funds, and the contract exposes no “read rules” function, but the operator could in principle act as that identity. v2 moves the key into the browser (or SIWE with the user's own wallet).
 
 ## Run it
 
 ```bash
 npm install
-npm test               # 58 TS tests (decoder, policy vectors, API, real adapter w/ mocked SDK)
+npm test               # 79 TS tests (decoder, policy vectors, API, email sign-in, real adapter w/ mocked SDK)
 npm run test:contract  # Rust TEE logic against the same vectors
 npm run dev            # API :8787 + web :5173 (mock T3N)
+SIGNGUARD_LOGIN=email npm run dev   # mock, with the email sign-in flow (code shown on screen)
 # or production-style:
 npm run build && npm start   # serves dist/ + API on :8787
 ```
@@ -152,9 +203,11 @@ tx-hash lookups.
 
 | Method | Path | |
 | --- | --- | --- |
-| POST | `/api/session` | `{handle?}` → `{handle, did, created, hasRules, mode}` |
+| POST | `/api/session` | `{handle?}` → `{signedIn, handle?, did?, hasRules, loginMethod, mode}` (email mode never mints here) |
+| POST | `/api/auth/email/start` | `{email}` → `{pendingId, expiresInSec, demoCode?}` (demoCode only in mock) |
+| POST | `/api/auth/email/verify` | `{pendingId, code}` → `{handle, did, created, sponsored?, notes?}` |
 | PUT | `/api/rules` | `{handle, rules}` → seals rules in the user's vault |
-| POST | `/api/check` | `{handle, input, chainId?, to?}` → facts, verdict, plain-English explanation |
+| POST | `/api/check` | `{handle?, input, chainId?, to?}` → facts, verdict, explanation (no signed-in handle in email mode → `policySource: "preview"`, `needsSignIn`) |
 | GET | `/api/stats` | public dashboard numbers |
 | GET | `/api/admin/dids[?format=csv]` | `x-admin-token` required |
 | GET | `/api/status` | adapter mode / readiness |

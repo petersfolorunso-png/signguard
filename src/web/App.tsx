@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { SAMPLES } from "../core/samples";
 import { CHAINS, shortAddr } from "../core/registry";
 import type { Rules, TxFacts } from "../core/types";
@@ -11,10 +11,28 @@ export function App() {
   const [tab, setTab] = useState<Tab>("check");
   const [session, setSession] = useState<Session | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Sign-in sheet; `after` runs once the visitor is signed in (e.g. re-run their check in the enclave).
+  const [signIn, setSignIn] = useState<{ reason?: string; after?: (s: Session) => void } | null>(null);
+  const [welcome, setWelcome] = useState<Session | null>(null);
 
   useEffect(() => {
     api.startSession().then(setSession).catch((e) => setErr(e.message));
   }, []);
+
+  const signedIn = !!session?.signedIn;
+  const askSignIn = (reason?: string, after?: (s: Session) => void) => setSignIn({ reason, after });
+  const onSignedIn = (s: Session) => {
+    const after = signIn?.after;
+    setSession(s);
+    setSignIn(null);
+    setWelcome(s);
+    setTimeout(() => setWelcome(null), 6000);
+    after?.(s);
+  };
+  const out = () => {
+    api.signOut();
+    setSession(session ? { signedIn: false, loginMethod: session.loginMethod, mode: session.mode } : null);
+  };
 
   return (
     <div className="shell">
@@ -26,10 +44,14 @@ export function App() {
         </div>
         <div className="top-right">
           {session && <ModePill mode={session.mode} />}
-          {session && (
+          {signedIn && session?.did && (
             <span className="did-chip" title={`Your T3N identity: ${session.did}`}>
               <span className="dot" /> {shortDid(session.did)}
+              {session.loginMethod === "email" && <button className="chip-x" onClick={out} title="Sign out" aria-label="Sign out">×</button>}
             </span>
+          )}
+          {session && !signedIn && (
+            <button className="signin-btn" onClick={() => askSignIn()}>Sign in</button>
           )}
         </div>
       </header>
@@ -43,12 +65,20 @@ export function App() {
       </nav>
 
       {err && <div className="alert">{err}</div>}
+      {welcome && (
+        <div className="ok welcome" role="status">
+          🎉 {welcome.created ? "You're in! Your own" : "Welcome back — your"} <b>did:t3n</b> is ready{welcome.sponsored ? ` with ${welcome.sponsored} free T3 credits` : ""}.
+          {welcome.notes?.map((n, i) => <div key={i} className="muted small">{n}</div>)}
+        </div>
+      )}
 
       <main>
-        {tab === "check" && <CheckView session={session} onRules={() => setTab("rules")} />}
-        {tab === "rules" && <RulesView session={session} />}
+        {tab === "check" && <CheckView session={session} onRules={() => setTab("rules")} askSignIn={askSignIn} />}
+        {tab === "rules" && <RulesView session={session} askSignIn={askSignIn} />}
         {tab === "stats" && <StatsView />}
       </main>
+
+      {signIn && session && <SignInSheet mode={session.mode} reason={signIn.reason} onClose={() => setSignIn(null)} onDone={onSignedIn} />}
 
       <footer className="foot">
         <p>
@@ -63,7 +93,9 @@ export function App() {
 
 // ------------------------------------------------------------------ Check
 
-function CheckView({ session, onRules }: { session: Session | null; onRules: () => void }) {
+type AskSignIn = (reason?: string, after?: (s: Session) => void) => void;
+
+function CheckView({ session, onRules, askSignIn }: { session: Session | null; onRules: () => void; askSignIn: AskSignIn }) {
   const [input, setInput] = useState("");
   const [chainId, setChainId] = useState<string>("");
   const [to, setTo] = useState("");
@@ -74,17 +106,19 @@ function CheckView({ session, onRules }: { session: Session | null; onRules: () 
   const [active, setActive] = useState<string | null>(null);
   const resultRef = useRef<HTMLDivElement>(null);
 
-  async function run(text = input, sampleId: string | null = null) {
-    if (!session) return;
+  async function run(text = input, sampleId: string | null = null, s: Session | null = session) {
+    if (!s) return;
     setBusy(true);
     setErr(null);
     setActive(sampleId);
     try {
-      const r = await api.check(session.handle, text, chainId ? Number(chainId) : undefined, to || undefined);
+      const r = await api.check(s.signedIn ? s.handle : undefined, text, chainId ? Number(chainId) : undefined, to || undefined);
       setRes(r);
       setTimeout(() => resultRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
     } catch (e) {
-      setErr((e as Error).message);
+      const ae = e as api.ApiError;
+      if (ae.signIn) askSignIn(ae.message, (ns) => run(text, sampleId, ns));
+      else setErr(ae.message);
       setRes(null);
     } finally {
       setBusy(false);
@@ -141,7 +175,7 @@ function CheckView({ session, onRules }: { session: Session | null; onRules: () 
 
       {res && (
         <div ref={resultRef}>
-          <VerdictCard res={res} onRules={onRules} />
+          <VerdictCard res={res} onRules={onRules} onSignIn={() => askSignIn("Run this check in your own private Terminal 3 enclave.", (ns) => run(input, active, ns))} />
         </div>
       )}
 
@@ -154,7 +188,7 @@ function CheckView({ session, onRules }: { session: Session | null; onRules: () 
   );
 }
 
-function VerdictCard({ res, onRules }: { res: CheckResponse; onRules: () => void }) {
+function VerdictCard({ res, onRules, onSignIn }: { res: CheckResponse; onRules: () => void; onSignIn: () => void }) {
   const v = res.result.verdict;
   const label = v === "block" ? "BLOCK" : v === "warn" ? "WARNING" : "LOOKS OK";
   const share = `SignGuard just ${v === "block" ? "stopped me from signing" : "checked"} a sketchy tx: "${res.explanation.headline}" 🛡️\n\nPrivate pre-sign rules, sealed in a @terminal3io enclave.`;
@@ -162,9 +196,15 @@ function VerdictCard({ res, onRules }: { res: CheckResponse; onRules: () => void
     <section className={`verdict v-${v}`} aria-live="polite">
       <div className="v-head">
         <div className="v-badge">{res.explanation.emoji} {label}</div>
-        <div className="v-src">{res.policySource === "t3n-tee" ? "Verdict from T3N enclave" : "Mock enclave (local)"}</div>
+        <div className="v-src">{res.policySource === "t3n-tee" ? "Verdict from T3N enclave" : res.policySource === "preview" ? "Preview · default rules" : "Mock enclave (local)"}</div>
       </div>
       <h2>{res.explanation.headline}</h2>
+      {res.needsSignIn && (
+        <div className="preview-cta">
+          <span>This is a quick local preview. Sign in with just your email to get your own <b>did:t3n</b> and run it against <b>your private rules</b> in a Terminal 3 enclave — free.</span>
+          <button className="primary small" onClick={onSignIn}>✉️ Sign in &amp; check privately</button>
+        </div>
+      )}
 
       {res.explanation.why.length > 0 && (
         <ul className="why">
@@ -185,7 +225,7 @@ function VerdictCard({ res, onRules }: { res: CheckResponse; onRules: () => void
       </details>
 
       <div className="v-foot">
-        <span title={res.did}>🪪 {shortDid(res.did)}</span>
+        {res.did && <span title={res.did}>🪪 {shortDid(res.did)}</span>}
         {res.credits !== undefined && <span>⛽ {res.credits} T3 credits</span>}
         <span>📥 {res.source.replace("_", " ")}</span>
       </div>
@@ -226,7 +266,7 @@ function FactsTable({ f }: { f: TxFacts }) {
 
 // ------------------------------------------------------------------ Rules
 
-function RulesView({ session }: { session: Session | null }) {
+function RulesView({ session, askSignIn }: { session: Session | null; askSignIn: AskSignIn }) {
   const [rules, setRules] = useState<Rules | null>(null);
   const [allowText, setAllowText] = useState("");
   const [saved, setSaved] = useState<string | null>(null);
@@ -243,15 +283,20 @@ function RulesView({ session }: { session: Session | null }) {
   const set = <K extends keyof Rules>(k: K, v: Rules[K]) => { setRules({ ...rules, [k]: v }); setSaved(null); };
   const numOrNull = (s: string) => (s.trim() === "" ? null : Number(s));
 
-  async function save() {
-    if (!session || !rules) return;
+  async function save(s: Session | null = session) {
+    if (!s || !rules) return;
+    if (!s.signedIn || !s.handle) return askSignIn("Sign in to seal these rules in your own Terminal 3 vault.", (ns) => save(ns));
     setBusy(true); setErr(null);
     try {
       const r = { ...rules, allowlist: allowText.split(/[\s,]+/).map((a) => a.trim()).filter(Boolean) };
-      await api.saveRules(session.handle, r);
+      await api.saveRules(s.handle, r);
       setRules(r);
-      setSaved(session.mode === "real" ? "Sealed in your Terminal 3 vault ✓" : "Saved to the mock vault ✓ (real T3N vault once the key is set)");
-    } catch (e) { setErr((e as Error).message); }
+      setSaved(s.mode === "real" ? "Sealed in your Terminal 3 vault ✓" : "Saved to the mock vault ✓ (real T3N vault once the key is set)");
+    } catch (e) {
+      const ae = e as api.ApiError;
+      if (ae.signIn) askSignIn(ae.message, (ns) => save(ns));
+      else setErr(ae.message);
+    }
     finally { setBusy(false); }
   }
 
@@ -276,7 +321,7 @@ function RulesView({ session }: { session: Session | null }) {
       <textarea id="allow" rows={4} value={allowText} onChange={(e) => { setAllowText(e.target.value); setSaved(null); }} placeholder="0x000000000022D473030F116dDEE9F6B43aC78BA3" spellCheck={false} />
       <Select label="When a contract isn't on the list" value={rules.unlistedContract} onChange={(v) => set("unlistedContract", v as Rules["unlistedContract"])} />
 
-      <button className="primary" onClick={save} disabled={busy || !session}>{busy ? <span className="spin" /> : "🔒"} Seal rules in my vault</button>
+      <button className="primary" onClick={() => save()} disabled={busy || !session}>{busy ? <span className="spin" /> : "🔒"} Seal rules in my vault</button>
       {saved && <div className="ok">{saved}</div>}
       {err && <div className="alert">{err}</div>}
     </section>
@@ -305,6 +350,100 @@ function Select({ label, value, onChange }: { label: string; value: string; onCh
         <option value="ignore">Ignore</option><option value="warn">Warn</option><option value="block">Block</option>
       </select>
     </label>
+  );
+}
+
+// ------------------------------------------------------------------ Sign in
+
+/** "Enter email, enter code, done." Terminal 3 sends the code; SignGuard never stores your email. */
+function SignInSheet({ mode, reason, onClose, onDone }: { mode: "mock" | "real"; reason?: string; onClose: () => void; onDone: (s: Session) => void }) {
+  const [step, setStep] = useState<"email" | "code">("email");
+  const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [pending, setPending] = useState<api.EmailStart | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [cooldown, setCooldown] = useState(0);
+  const codeRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown(cooldown - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
+  useEffect(() => {
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && !busy && onClose();
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [busy, onClose]);
+
+  async function send(e?: React.FormEvent) {
+    e?.preventDefault();
+    setBusy(true); setErr(null);
+    try {
+      const p = await api.emailStart(email.trim());
+      setPending(p); setStep("code"); setCode(""); setCooldown(45);
+      setTimeout(() => codeRef.current?.focus(), 50);
+    } catch (ex) {
+      const ae = ex as api.ApiError;
+      setErr(ae.message);
+      if (ae.retryAfterSecs) setCooldown(ae.retryAfterSecs);
+    } finally { setBusy(false); }
+  }
+
+  async function verify(e?: React.FormEvent) {
+    e?.preventDefault();
+    if (!pending) return;
+    setBusy(true); setErr(null);
+    try {
+      onDone(await api.emailVerify(pending.pendingId, code.trim()));
+    } catch (ex) {
+      const ae = ex as api.ApiError;
+      setErr(ae.message);
+      // T3N's login is single-shot in real mode: a refused/expired code needs a fresh one.
+      if (ae.status === 410 || (mode === "real" && ae.status === 400)) { setPending(null); setCooldown(0); }
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="sheet-bg" onClick={() => !busy && onClose()}>
+      <div className="sheet" role="dialog" aria-modal="true" aria-labelledby="signin-h" onClick={(e) => e.stopPropagation()}>
+        <button className="sheet-x" onClick={onClose} disabled={busy} aria-label="Close">×</button>
+        <div className="sheet-steps" aria-hidden>
+          <span className={step === "email" ? "on" : "done"}>1 · Email</span>
+          <span className={step === "code" ? "on" : ""}>2 · Code</span>
+          <span>3 · Done</span>
+        </div>
+        {step === "email" ? (
+          <form onSubmit={send}>
+            <h2 id="signin-h">Get your private vault</h2>
+            <p className="muted">{reason ?? "Your rules live under your own did:t3n identity on Terminal 3."} Just your email — no wallet, no seed phrase, free.</p>
+            <input className="big-input" type="email" inputMode="email" autoComplete="email" autoFocus required placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} aria-label="Email" />
+            <button className="primary" disabled={busy || !email.includes("@") || cooldown > 0}>
+              {busy ? <span className="spin" /> : "✉️"} {cooldown > 0 ? `Try again in ${cooldown}s` : busy ? "Sending…" : "Email me a code"}
+            </button>
+            <p className="muted small">{mode === "real" ? "Terminal 3 emails you a one-time code. SignGuard never stores your email." : "Demo mode: no email is sent — the code appears on the next screen."}</p>
+          </form>
+        ) : (
+          <form onSubmit={verify}>
+            <h2 id="signin-h">Check your inbox</h2>
+            <p className="muted">Enter the code we sent to <b>{email}</b>.</p>
+            {pending?.demoCode && <div className="demo-code">Demo code: <b>{pending.demoCode}</b></div>}
+            <input ref={codeRef} className="big-input code" inputMode="numeric" autoComplete="one-time-code" placeholder="123456" maxLength={12} value={code} onChange={(e) => setCode(e.target.value.replace(/\s/g, ""))} aria-label="Code" disabled={!pending} />
+            {pending ? (
+              <button className="primary" disabled={busy || code.length < 4}>{busy ? <span className="spin" /> : "✅"} {busy ? "Creating your did:t3n…" : "Verify & continue"}</button>
+            ) : (
+              <button type="button" className="primary" onClick={() => send()} disabled={busy || cooldown > 0}>{cooldown > 0 ? `New code in ${cooldown}s` : "Send a new code"}</button>
+            )}
+            <div className="sheet-links">
+              <button type="button" className="link" onClick={() => { setStep("email"); setErr(null); }}>Use a different email</button>
+              {pending && <button type="button" className="link" disabled={busy || cooldown > 0} onClick={() => send()}>{cooldown > 0 ? `Resend in ${cooldown}s` : "Resend code"}</button>}
+            </div>
+          </form>
+        )}
+        {err && <div className="alert">{err}</div>}
+      </div>
+    </div>
   );
 }
 

@@ -4,11 +4,18 @@
  * NOT yet exercised live: it needs the API key from the claim page plus the
  * one-time setup in scripts/t3n-setup.ts (org, agent, contract, map).
  *
- * Identity model (v1): each browser gets a fresh random secp256k1 key — a
- * throwaway *identity* key, never a wallet that holds funds. It is generated
- * and kept server-side, encrypted at rest (AES-256-GCM, SIGNGUARD_KEY_SECRET),
- * so a follower can try SignGuard in one click with no wallet. v2 moves the
- * key into the browser (or SIWE with the user's own wallet).
+ * Identity model:
+ *  - "email" login (default for real mode): T3N's email-code sign-in
+ *    (createEmailOtpAuthInput). T3N emails the visitor a code, the DID is keyed
+ *    on the email (same email -> same DID), then `submitUserInput` (user-upsert)
+ *    registers the profile, so the org can add + fund it. We then link a
+ *    throwaway secp256k1 *device key* to that DID (`addAuthMethod`) so later
+ *    sessions resume without another email. SignGuard never stores the email.
+ *  - "anonymous" login (legacy / delegated experiments): a fresh device key
+ *    per browser. T3N treats such wallet-only DIDs as non-users, so they can't
+ *    be added to an org or sponsored.
+ * Device keys never hold funds; they are kept server-side, encrypted at rest
+ * (AES-256-GCM, SIGNGUARD_KEY_SECRET).
  */
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { Wallet } from "ethers";
@@ -20,6 +27,7 @@ import {
   loadWasmComponent,
   resolveTrustAnchor,
   eth_get_address,
+  createEmailOtpAuthInput,
   metamask_sign,
   createEthAuthInput,
   getContractVersion,
@@ -29,7 +37,9 @@ import {
   type BoundGrant,
 } from "@terminal3/t3n-sdk";
 import type { Rules, TxFacts, Verdict, Hit, ReasonCode } from "../../core/types.js";
-import type { ActivityRow, AdapterStatus, CheckOutcome, Identity, T3nAdapter } from "./adapter.js";
+import { SignInRequired, UserFacingError } from "./adapter.js";
+import type { ActivityRow, AdapterStatus, CheckOutcome, EmailLoginDone, EmailLoginStart, Identity, LoginMethod, T3nAdapter } from "./adapter.js";
+import { normalizeCode, normalizeEmail, PENDING_TTL_SECS } from "./email.js";
 import { JsonFile } from "../jsonfile.js";
 
 /**
@@ -52,6 +62,8 @@ export interface RealConfig {
   /** SignGuard organisation (admin = devKey). Required for "self" mode sponsorship. */
   orgDid?: string;
   userMode: UserMode;
+  /** How visitors sign in. Default "email" (needed for self-mode sponsorship). */
+  loginMethod?: LoginMethod;
   /** Credits sponsored to a new user, and the per-user lifetime cap. */
   userCredits: number;
   userCreditCap: number;
@@ -75,7 +87,29 @@ interface IdentityRecord {
   member?: boolean;
   sponsored?: number;
   sponsorError?: string;
+  /** Email login: device key linked to the DID via addAuthMethod (resumable without email). */
+  linked?: boolean;
+  /** Email login: registered via user-upsert. */
+  registered?: boolean;
   createdAt: number;
+}
+
+/** Sponsorship is tracked per DID (a returning user may sign in from several browsers). */
+interface DidRecord {
+  member?: boolean;
+  sponsored?: number;
+  registered?: boolean;
+  hasRules?: boolean;
+}
+
+interface PendingEmail {
+  client: T3nClient;
+  pk: string;
+  supplyCode: (code: string) => void;
+  cancel: (e: Error) => void;
+  auth: Promise<string>;
+  expires: number;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 type WasmComponent = Awaited<ReturnType<typeof loadWasmComponent>>;
@@ -86,6 +120,7 @@ export function explainT3nError(e: unknown): string {
   if (/can't attribute a non-user|does not exist/i.test(m))
     return "T3N only lets an org add *registered* users (email-verified via user-upsert); this wallet-only identity isn't one yet, so it can't be sponsored credits.";
   if (/insufficient.?credit/i.test(m)) return "Not enough T3N credits for this call.";
+  if (/email_not_verified/i.test(m)) return "T3N wants a verified email before registering this identity.";
   if (/daily T3N credit budget/.test(m)) return m;
   return `T3N refused the call: ${m.replace(/t3n_key_\S+/g, "<redacted>").slice(0, 200)}`;
 }
@@ -98,7 +133,9 @@ export class RealT3n implements T3nAdapter {
   private wasm: Promise<WasmComponent> | null = null;
   private trust: ReturnType<typeof resolveTrustAnchor> | null = null;
   private sessions = new Map<string, { client: T3nClient; did: string; at: number }>();
-  private ids: JsonFile<{ users: Record<string, IdentityRecord> }>;
+  private ids: JsonFile<{ users: Record<string, IdentityRecord>; dids?: Record<string, DidRecord> }>;
+  private pending = new Map<string, PendingEmail>();
+  readonly loginMethod: LoginMethod;
   private version: string | null = null;
   private aesKey: Buffer;
   private admin: { client: T3nClient; did: string; at: number } | null = null;
@@ -111,6 +148,21 @@ export class RealT3n implements T3nAdapter {
     this.ids = new JsonFile(`${cfg.dataDir}/identities.json`, { users: {} });
     this.budget = new JsonFile(`${cfg.dataDir}/sponsor-budget.json`, { day: "", spent: 0, total: 0 });
     this.aesKey = createHash("sha256").update(cfg.keySecret).digest();
+    this.loginMethod = cfg.loginMethod ?? "email";
+  }
+
+  private didRec(did: string): DidRecord {
+    const all = (this.ids.data.dids ??= {});
+    if (!all[did]) {
+      // Migrate state that older records kept per handle.
+      const old = Object.values(this.ids.data.users).filter((u) => u.did === did);
+      all[did] = {
+        member: old.some((u) => u.member) || undefined,
+        sponsored: old.reduce((n, u) => n + (u.sponsored ?? 0), 0) || undefined,
+        hasRules: old.some((u) => u.hasRules) || undefined,
+      };
+    }
+    return all[did];
   }
 
   // ------------------------------------------------------------ plumbing
@@ -121,11 +173,18 @@ export class RealT3n implements T3nAdapter {
     return { wasmComponent: await this.wasm, trustAnchor: await this.trust };
   }
 
-  private async session(privateKey: string): Promise<{ client: T3nClient; did: string }> {
+  /** A handshaken client whose EthSign handler signs with `privateKey`. */
+  private async newClient(privateKey: string): Promise<T3nClient> {
     const { wasmComponent, trustAnchor } = await this.base();
     const address = eth_get_address(privateKey);
     const client = new T3nClient({ trustAnchor, wasmComponent, handlers: { EthSign: metamask_sign(address, undefined, privateKey) } });
     await client.handshake();
+    return client;
+  }
+
+  private async session(privateKey: string): Promise<{ client: T3nClient; did: string }> {
+    const address = eth_get_address(privateKey);
+    const client = await this.newClient(privateKey);
     const did = await client.authenticate(createEthAuthInput(address));
     return { client, did: did.value }; // Did object -> .value (docs: never derive a DID)
   }
@@ -151,10 +210,17 @@ export class RealT3n implements T3nAdapter {
 
   private async userSession(handle: string) {
     const cached = this.sessions.get(handle);
-    if (cached && Date.now() - cached.at < 10 * 60_000) return cached;
     const rec = this.ids.data.users[handle];
-    if (!rec) throw new Error("unknown user — start a session first");
+    if (!rec) throw new SignInRequired();
+    // Email logins whose device key isn't linked can only live as long as the email session.
+    const emailOnly = this.loginMethod === "email" && !rec.linked;
+    if (cached && Date.now() - cached.at < (emailOnly ? 50 : 10) * 60_000) return cached;
+    if (emailOnly) {
+      this.sessions.delete(handle);
+      throw new SignInRequired("Your sign-in expired. Enter your email again to get a new code.");
+    }
     const s = await this.session(this.decrypt(rec.enc));
+    if (s.did !== rec.did) throw new SignInRequired("This device key no longer maps to your identity. Sign in with your email again.");
     const entry = { ...s, at: Date.now() };
     this.sessions.set(handle, entry);
     return entry;
@@ -168,8 +234,9 @@ export class RealT3n implements T3nAdapter {
   }
 
   /** Org admin adds the user to the SignGuard org (once) and sponsors credits, within caps. */
-  private async sponsor(rec: IdentityRecord): Promise<boolean> {
+  private async sponsor(did: string): Promise<boolean> {
     if (this.cfg.userMode !== "self") return false;
+    const rec = this.didRec(did);
     const today = new Date().toISOString().slice(0, 10);
     const b = this.budget.data;
     if (b.day !== today) { b.day = today; b.spent = 0; }
@@ -178,11 +245,16 @@ export class RealT3n implements T3nAdapter {
     if (b.spent + amount > this.cfg.dailyBudget) throw new Error("SignGuard's free daily T3N credit budget is used up — try again tomorrow");
     const { client } = await this.adminSession();
     if (!rec.member) {
-      await client.addOrganisationMember(this.cfg.orgDid!, rec.did);
+      try {
+        await client.addOrganisationMember(this.cfg.orgDid!, did);
+      } catch (e) {
+        // user-upsert with organisationDid may already have attached them.
+        if (!/already/i.test(String((e as Error)?.message ?? e))) throw e;
+      }
       rec.member = true;
       this.ids.save(true);
     }
-    await client.fundAgent(rec.did, toBaseUnits(amount), { note: "signguard user sponsorship" });
+    await client.fundAgent(did, toBaseUnits(amount), { note: "signguard user sponsorship" });
     rec.sponsored = (rec.sponsored ?? 0) + amount;
     b.spent += amount;
     b.total += amount;
@@ -192,14 +264,14 @@ export class RealT3n implements T3nAdapter {
   }
 
   /** Run a user-paid call; on InsufficientCredit, sponsor once (within caps) and retry. */
-  private async withCredits<T>(rec: IdentityRecord, fn: () => Promise<T>): Promise<T> {
+  private async withCredits<T>(rec: { did: string }, fn: () => Promise<T>): Promise<T> {
     try {
       return await fn();
     } catch (e) {
       if (!/insufficient.?credit/i.test(String((e as Error)?.message ?? e))) throw e;
       let ok: boolean;
       try {
-        ok = await this.sponsor(rec);
+        ok = await this.sponsor(rec.did);
       } catch (se) {
         throw new Error(explainT3nError(se));
       }
@@ -210,9 +282,113 @@ export class RealT3n implements T3nAdapter {
 
   // ------------------------------------------------------------ adapter
 
+  /**
+   * Email sign-in, step 1. Starts T3N's email-OTP login on a fresh client; the
+   * SDK calls `getOtpCode` once T3N has emailed the code, and we park the login
+   * until step 2 supplies it (or 10 minutes pass).
+   */
+  async startEmailLogin(rawEmail: string): Promise<EmailLoginStart> {
+    if (this.loginMethod !== "email") throw new UserFacingError("Email sign-in is off on this server.");
+    const email = normalizeEmail(rawEmail);
+    const pk = Wallet.createRandom().privateKey; // device key, linked after sign-in
+    const client = await this.newClient(pk);
+    let supplyCode!: (c: string) => void;
+    let cancel!: (e: Error) => void;
+    const codeP = new Promise<string>((res, rej) => { supplyCode = res; cancel = rej; });
+    let sent!: () => void;
+    const sentP = new Promise<void>((res) => (sent = res));
+    const auth = client
+      .authenticate(createEmailOtpAuthInput({ email, getOtpCode: () => { sent(); return codeP; } }))
+      .then((d) => d.value);
+    auth.catch(() => {}); // observed below / in verify
+    try {
+      await Promise.race([sentP, auth.then(() => { throw new Error("T3N signed in without asking for a code"); })]);
+    } catch (e) {
+      throw mapLoginError(e);
+    }
+    const pendingId = randomBytes(16).toString("hex");
+    const timer = setTimeout(() => {
+      const p = this.pending.get(pendingId);
+      if (p) { this.pending.delete(pendingId); p.cancel(new Error("expired")); }
+    }, PENDING_TTL_SECS * 1000);
+    timer.unref?.();
+    this.pending.set(pendingId, { client, pk, supplyCode, cancel, auth, expires: Date.now() + PENDING_TTL_SECS * 1000, timer });
+    return { pendingId, expiresInSec: PENDING_TTL_SECS };
+  }
+
+  /**
+   * Email sign-in, step 2: finish the login, register the profile (user-upsert,
+   * attributed to our org), add the DID to the org + sponsor credits, then link
+   * the device key so the browser can resume later without email.
+   */
+  async verifyEmailLogin(pendingId: string, rawCode: string): Promise<EmailLoginDone> {
+    const code = normalizeCode(rawCode);
+    const p = this.pending.get(String(pendingId));
+    if (!p || p.expires < Date.now()) throw new UserFacingError("That code expired. Request a new one.", 410);
+    this.pending.delete(String(pendingId));
+    clearTimeout(p.timer);
+    p.supplyCode(code);
+    let did: string;
+    try {
+      did = await p.auth;
+    } catch (e) {
+      // The SDK login is single-shot: a refused code ends it, so ask for a new one.
+      throw mapLoginError(e, true);
+    }
+    const notes: string[] = [];
+    const drec = this.didRec(did);
+    const created = !drec.registered && !drec.member;
+    // 1) Register (user-upsert). Testnet ran user-upsert for a 0-credit DID
+    //    (it answered email_not_verified, not InsufficientCredit), so we expect
+    //    registration to be free; if it isn't, there's no way to pre-fund a
+    //    non-user, so surface it clearly.
+    if (!drec.registered) {
+      try {
+        await p.client.submitUserInput({ profile: {}, ...(this.cfg.orgDid ? { organisationDid: this.cfg.orgDid } : {}) });
+      } catch (e) {
+        const m = String((e as Error)?.message ?? e);
+        if (/insufficient.?credit/i.test(m)) throw new UserFacingError("Terminal 3 wants credits to register new users, and SignGuard can only fund registered users. We're on it — please try again later.", 503);
+        throw new UserFacingError(explainT3nError(e), 502);
+      }
+      drec.registered = true;
+      this.ids.save(true);
+    }
+    // 2) Org membership + sponsored credits (self mode), within caps.
+    let sponsored: number | undefined;
+    try {
+      const before = drec.sponsored ?? 0;
+      if (!drec.sponsored) await this.sponsor(did);
+      if ((drec.sponsored ?? 0) > before) sponsored = (drec.sponsored ?? 0) - before;
+    } catch (e) {
+      notes.push(explainT3nError(e));
+    }
+    // 3) Link the device key so later sessions resume without another email.
+    const handle = randomBytes(16).toString("hex");
+    const rec: IdentityRecord = { did, enc: this.encrypt(p.pk), registered: true, createdAt: Date.now() };
+    try {
+      await p.client.addAuthMethod(createEthAuthInput(eth_get_address(p.pk)));
+      rec.linked = true;
+    } catch (e) {
+      notes.push(`Couldn't link a device key (${explainT3nError(e)}); you'll need a new email code when this session expires.`);
+    }
+    this.ids.data.users[handle] = rec;
+    this.ids.save(true);
+    this.sessions.set(handle, { client: p.client, did, at: Date.now() });
+    return { handle, did, created, sponsored, notes: notes.length ? notes : undefined };
+  }
+
+  async isSignedIn(handle: string): Promise<boolean> {
+    const rec = this.ids.data.users[handle];
+    if (!rec) return false;
+    if (this.loginMethod !== "email" || rec.linked) return true;
+    const s = this.sessions.get(handle);
+    return !!s && Date.now() - s.at < 50 * 60_000;
+  }
+
   async ensureIdentity(handle: string): Promise<Identity> {
     const rec = this.ids.data.users[handle];
     if (rec) return { did: rec.did, created: false };
+    if (this.loginMethod === "email") throw new SignInRequired();
     const pk = Wallet.createRandom().privateKey;
     const s = await this.session(pk); // first sign-in mints the user's did:t3n
     const fresh: IdentityRecord = { did: s.did, enc: this.encrypt(pk), createdAt: Date.now() };
@@ -222,7 +398,7 @@ export class RealT3n implements T3nAdapter {
     // New DIDs start at 0 credits (verified on testnet), so sponsor up front.
     // Don't fail the session if T3N refuses; check() surfaces a clear error.
     try {
-      await this.sponsor(fresh);
+      await this.sponsor(fresh.did);
     } catch (e) {
       fresh.sponsorError = explainT3nError(e);
       this.ids.save(true);
@@ -232,6 +408,7 @@ export class RealT3n implements T3nAdapter {
 
   async saveRules(handle: string, rules: Rules): Promise<void> {
     const rec = this.ids.data.users[handle];
+    if (!rec) throw new SignInRequired();
     const { client } = await this.userSession(handle);
     const contract_version = await this.contractVersion();
     // Self call: the user writes their own rules into the TEE-private map.
@@ -245,16 +422,18 @@ export class RealT3n implements T3nAdapter {
       rec.granted = true;
     }
     rec.hasRules = true;
+    this.didRec(rec.did).hasRules = true;
     this.ids.save(true);
   }
 
   async hasRules(handle: string): Promise<boolean> {
-    return !!this.ids.data.users[handle]?.hasRules;
+    const rec = this.ids.data.users[handle];
+    return !!rec && (!!rec.hasRules || !!this.didRec(rec.did).hasRules);
   }
 
   async check(handle: string, facts: TxFacts[]): Promise<CheckOutcome> {
     const rec = this.ids.data.users[handle];
-    if (!rec) throw new Error("unknown user — start a session first");
+    if (!rec) throw new SignInRequired();
     type Res = { verdict: Verdict; codes: { code: ReasonCode; severity: "warn" | "block" }[] };
     const contract_version = await this.contractVersion();
     let res: Res;
@@ -288,6 +467,7 @@ export class RealT3n implements T3nAdapter {
       ready = false;
       notes.push(`Contract ${this.cfg.contract} not reachable: ${(e as Error).message}`);
     }
+    notes.push(`Sign-in: ${this.loginMethod === "email" ? "email code (T3N email-OTP + user-upsert)" : "anonymous device key"}`);
     notes.push(`User mode: ${this.cfg.userMode}${this.cfg.userMode === "self" ? ` (sponsoring ${this.cfg.userCredits} credits per new user, cap ${this.cfg.userCreditCap}, daily budget ${this.cfg.dailyBudget})` : ""}`);
     return { mode: "real", network: this.cfg.env, ready, contract: this.cfg.contract, agentDid: this.cfg.agentDid, notes };
   }
@@ -305,4 +485,17 @@ export class RealT3n implements T3nAdapter {
     } while (cursor !== undefined && out.length < max);
     return out;
   }
+}
+
+/** Map SDK login failures to messages a visitor can act on. */
+function mapLoginError(e: unknown, afterCode = false): Error {
+  if (e instanceof UserFacingError) return e;
+  const err = e as { name?: string; retryAfterSecs?: number; message?: string };
+  const m = String(err?.message ?? e);
+  if (err?.name === "OtpRateLimitedError" || /cooldown_active|send_cap_exceeded|rate.?limit/i.test(m)) {
+    const wait = typeof err.retryAfterSecs === "number" ? err.retryAfterSecs : undefined;
+    return new UserFacingError(`You just asked for a code${wait ? ` — try again in ${wait}s` : " — try again in a minute"}.`, 429, wait);
+  }
+  if (afterCode) return new UserFacingError("That code didn't work (wrong or expired). Request a new code and try again.");
+  return new UserFacingError(`Couldn't send a code: ${m.replace(/t3n_key_\S+/g, "<redacted>").slice(0, 160)}`, 502);
 }

@@ -19,6 +19,8 @@ if (cfg.mode === "real") {
     devKey: process.env.T3N_API_KEY!,
     orgDid: process.env.T3N_ORG_DID,
     userMode: process.env.T3N_USER_MODE === "delegated" ? "delegated" : "self",
+    // Email-code sign-in makes each visitor a registered user the org can sponsor.
+    loginMethod: process.env.SIGNGUARD_LOGIN === "anonymous" ? "anonymous" : "email",
     // Measured on testnet 2026-11-19: check ≈ 40 credits, set-rules ≈ 90.
     // 100 = ~2 checks on default rules; cap 300 = rules save + ~5 checks.
     userCredits: Number(process.env.SIGNGUARD_USER_CREDITS ?? 100),
@@ -31,7 +33,8 @@ if (cfg.mode === "real") {
     dataDir: cfg.dataDir,
   });
 } else {
-  adapter = new MockT3n(join(cfg.dataDir, "mock-t3n.json"));
+  // Mock defaults to one-click anonymous DIDs; SIGNGUARD_LOGIN=email simulates the email flow (code shown on screen, nothing sent).
+  adapter = new MockT3n(join(cfg.dataDir, "mock-t3n.json"), { loginMethod: process.env.SIGNGUARD_LOGIN === "email" ? "email" : "anonymous" });
 }
 
 const usage = new Usage(join(cfg.dataDir, `usage-${cfg.mode}.json`));
@@ -44,7 +47,7 @@ if (existsSync(dist)) {
 }
 
 const server = app.listen(cfg.port, () => {
-  console.log(`[signguard] http://localhost:${cfg.port}  mode=${cfg.mode}${cfg.mode === "mock" ? ` (missing for real T3N: ${cfg.missing.join(", ")})` : ""}  secrets=${secrets.loaded ? "loaded" : "none"}`);
+  console.log(`[signguard] http://localhost:${cfg.port}  mode=${cfg.mode} login=${adapter.loginMethod}${cfg.mode === "mock" ? ` (missing for real T3N: ${cfg.missing.join(", ")})` : ""}  secrets=${secrets.loaded ? "loaded" : "none"}`);
 });
 const stop = () => { usage.flush(); server.close(() => process.exit(0)); };
 process.on("SIGINT", stop);
