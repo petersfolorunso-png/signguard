@@ -87,7 +87,7 @@ describe("RealT3n email sign-in", () => {
     expect(done.sponsored).toBe(5);
     expect(done.handle).toMatch(/^[a-f0-9]{32}$/);
     expect(calls.map((c) => c.fn)).toEqual(["authenticate:email", "submitUserInput", "addOrganisationMember", "fundAgent", "addAuthMethod"]);
-    expect((calls[1].args[1] as any).organisationDid).toBe("did:t3n:org");
+    expect((calls[1].args[1] as any).organisationDid).toBe("org"); // bare hex, no did:t3n: prefix (T3N wants 40 hex)
     expect(calls[2].args).toEqual(["did:t3n:org", done.did]);
     expect(await t.isSignedIn(done.handle)).toBe(true);
     await t.saveRules(done.handle, RULES);
@@ -123,6 +123,19 @@ describe("RealT3n email sign-in", () => {
     await expect(t.verifyEmailLogin(s.pendingId, "000000")).rejects.toThrow(/didn't work/);
     await expect(t.verifyEmailLogin(s.pendingId, GOOD_CODE)).rejects.toThrow(/expired/);
     expect(calls.some((c) => c.fn === "submitUserInput")).toBe(false);
+  });
+
+  it("a failure after the code is redeemed can be retried without a new email", async () => {
+    const t = make({ loginMethod: "email" });
+    const s = await t.startEmailLogin("hal@example.com");
+    sdkKnobs.upsertError = "input: organisation_did must be 40 hex chars, got 48";
+    await expect(t.verifyEmailLogin(s.pendingId, GOOD_CODE)).rejects.toThrow(/press Verify again/);
+    sdkKnobs.upsertError = null;
+    const d = await t.verifyEmailLogin(s.pendingId, GOOD_CODE);
+    expect(d.did).toMatch(/^did:t3n:/);
+    expect(sent).toEqual(["hal@example.com"]);
+    expect(calls.filter((c) => c.fn === "authenticate:email")).toHaveLength(1);
+    await expect(t.verifyEmailLogin(s.pendingId, GOOD_CODE)).rejects.toThrow(/expired/); // consumed on success
   });
 
   it("maps T3N's resend throttle to a 429 with retryAfter", async () => {

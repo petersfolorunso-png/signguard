@@ -422,7 +422,7 @@ function SignInSheet({ mode, reason, onClose, onDone }: { mode: "mock" | "real";
             <button className="primary" disabled={busy || !email.includes("@") || cooldown > 0}>
               {busy ? <span className="spin" /> : "✉️"} {cooldown > 0 ? `Try again in ${cooldown}s` : busy ? "Sending…" : "Email me a code"}
             </button>
-            <p className="muted small">{mode === "real" ? "Terminal 3 emails you a one-time code. SignGuard never stores your email." : "Demo mode: no email is sent — the code appears on the next screen."}</p>
+            <p className="muted small">{mode === "real" ? "Terminal 3 emails you a one-time code (it expires fast, so have your inbox ready). SignGuard never stores your email." : "Demo mode: no email is sent — the code appears on the next screen."}</p>
           </form>
         ) : (
           <form onSubmit={verify}>

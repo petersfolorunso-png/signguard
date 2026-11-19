@@ -110,7 +110,12 @@ interface PendingEmail {
   auth: Promise<string>;
   expires: number;
   timer: ReturnType<typeof setTimeout>;
+  /** Set once the code has been redeemed; later retries reuse this session. */
+  did?: string;
 }
+
+/** T3N wants bare 40-hex DIDs in some inputs (e.g. user-upsert organisation_did). */
+export const didHex = (did: string) => did.replace(/^did:t3n:/, "");
 
 type WasmComponent = Awaited<ReturnType<typeof loadWasmComponent>>;
 
@@ -325,16 +330,20 @@ export class RealT3n implements T3nAdapter {
     const code = normalizeCode(rawCode);
     const p = this.pending.get(String(pendingId));
     if (!p || p.expires < Date.now()) throw new UserFacingError("That code expired. Request a new one.", 410);
-    this.pending.delete(String(pendingId));
-    clearTimeout(p.timer);
-    p.supplyCode(code);
-    let did: string;
-    try {
-      did = await p.auth;
-    } catch (e) {
-      // The SDK login is single-shot: a refused code ends it, so ask for a new one.
-      throw mapLoginError(e, true);
+    if (!p.did) {
+      p.supplyCode(code);
+      try {
+        p.did = await p.auth;
+      } catch (e) {
+        // The SDK login is single-shot: a refused code ends it, so ask for a new one.
+        this.pending.delete(String(pendingId));
+        clearTimeout(p.timer);
+        throw mapLoginError(e, true);
+      }
     }
+    // From here on the email is proven: if a later step fails, the pending login
+    // stays parked so "Verify" can be retried without a new email.
+    const did = p.did;
     const notes: string[] = [];
     const drec = this.didRec(did);
     const created = !drec.registered && !drec.member;
@@ -344,11 +353,11 @@ export class RealT3n implements T3nAdapter {
     //    non-user, so surface it clearly.
     if (!drec.registered) {
       try {
-        await p.client.submitUserInput({ profile: {}, ...(this.cfg.orgDid ? { organisationDid: this.cfg.orgDid } : {}) });
+        await p.client.submitUserInput({ profile: {}, ...(this.cfg.orgDid ? { organisationDid: didHex(this.cfg.orgDid) } : {}) });
       } catch (e) {
         const m = String((e as Error)?.message ?? e);
         if (/insufficient.?credit/i.test(m)) throw new UserFacingError("Terminal 3 wants credits to register new users, and SignGuard can only fund registered users. We're on it — please try again later.", 503);
-        throw new UserFacingError(explainT3nError(e), 502);
+        throw new UserFacingError(`${explainT3nError(e)} Your email is verified — press Verify again to retry (no new code needed).`, 502);
       }
       drec.registered = true;
       this.ids.save(true);
@@ -374,6 +383,8 @@ export class RealT3n implements T3nAdapter {
     this.ids.data.users[handle] = rec;
     this.ids.save(true);
     this.sessions.set(handle, { client: p.client, did, at: Date.now() });
+    this.pending.delete(String(pendingId));
+    clearTimeout(p.timer);
     return { handle, did, created, sponsored, notes: notes.length ? notes : undefined };
   }
 
