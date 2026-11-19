@@ -1,0 +1,3 @@
+host-interfaces-2.4.0/ and host-tenant-2.0.0/ are the Terminal 3 host ABI
+definitions, vendored unchanged from https://github.com/Terminal-3/agent-vault-starter
+(Apache-2.0), which vendors them from Terminal-3/trinity release testnet-v1.0.12.

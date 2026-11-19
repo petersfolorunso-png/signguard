@@ -1,0 +1,91 @@
+{
+  "defaultRules": {
+    "blockUnlimitedApprovals": true,
+    "blockApprovalForAll": true,
+    "maxSpendUsd": 1000,
+    "maxLeverage": 10,
+    "allowlist": [],
+    "unlistedContract": "warn",
+    "permitSignatures": "warn",
+    "maxPermitDays": 30
+  },
+  "now": 1795000000,
+  "cases": [
+    {
+      "name": "hostile unlimited USDC approve to unknown spender",
+      "facts": [{ "kind": "approve", "chainId": 42161, "token": "0xaf88d065e77c8cc2239327c5edb3a432268e5831", "tokenSymbol": "USDC", "spender": "0x3c1e5f0a9b7d42e8a6c0f19d2b4e7a8c5d6f0e91", "amountRaw": "115792089237316195423570985008687907853269984665640564039457584007913129639935", "unlimited": true, "spenderKnown": false }],
+      "expect": { "verdict": "block", "codes": ["unlimited_approval", "spend_over_cap", "unknown_spender"] }
+    },
+    {
+      "name": "unlimited approve to allowlisted spender only warns",
+      "rules": { "allowlist": ["0x3c1e5f0a9b7d42e8a6c0f19d2b4e7a8c5d6f0e91"], "maxSpendUsd": null },
+      "facts": [{ "kind": "approve", "spender": "0x3c1e5f0a9b7d42e8a6c0f19d2b4e7a8c5d6f0e91", "amountRaw": "1", "unlimited": true, "spenderKnown": false }],
+      "expect": { "verdict": "warn", "codes": ["unlimited_approval"] }
+    },
+    {
+      "name": "exact small approve to known protocol is allowed",
+      "facts": [{ "kind": "approve", "spender": "0x000000000022d473030f116ddee9f6b43ac78ba3", "amountRaw": "50000000", "amount": 50, "amountUsd": 50, "unlimited": false, "spenderKnown": true }],
+      "expect": { "verdict": "allow", "codes": [] }
+    },
+    {
+      "name": "approve over spend cap blocks",
+      "facts": [{ "kind": "approve", "spender": "0x000000000022d473030f116ddee9f6b43ac78ba3", "amountRaw": "5000000000", "amount": 5000, "amountUsd": 5000, "unlimited": false, "spenderKnown": true }],
+      "expect": { "verdict": "block", "codes": ["spend_over_cap"] }
+    },
+    {
+      "name": "unpriced token warns",
+      "facts": [{ "kind": "transfer", "recipient": "0x1111111111111111111111111111111111111111", "amountRaw": "1000", "unlimited": false }],
+      "expect": { "verdict": "warn", "codes": ["spend_unpriced"] }
+    },
+    {
+      "name": "setApprovalForAll to unknown operator blocks",
+      "facts": [{ "kind": "setApprovalForAll", "spender": "0x3c1e5f0a9b7d42e8a6c0f19d2b4e7a8c5d6f0e91", "approvalForAll": true, "spenderKnown": false }],
+      "expect": { "verdict": "block", "codes": ["approval_for_all", "unknown_spender"] }
+    },
+    {
+      "name": "revoking setApprovalForAll is fine",
+      "facts": [{ "kind": "setApprovalForAll", "spender": "0x3c1e5f0a9b7d42e8a6c0f19d2b4e7a8c5d6f0e91", "approvalForAll": false, "spenderKnown": false }],
+      "expect": { "verdict": "allow", "codes": [] }
+    },
+    {
+      "name": "leverage above cap blocks",
+      "facts": [{ "kind": "perp_leverage", "leverage": 50 }],
+      "expect": { "verdict": "block", "codes": ["leverage_over_cap"] }
+    },
+    {
+      "name": "leverage at cap allowed",
+      "facts": [{ "kind": "perp_leverage", "leverage": 10 }],
+      "expect": { "verdict": "allow", "codes": [] }
+    },
+    {
+      "name": "off-chain permit for max with long deadline",
+      "facts": [{ "kind": "permit", "offchainSignature": true, "spender": "0x3c1e5f0a9b7d42e8a6c0f19d2b4e7a8c5d6f0e91", "amountRaw": "115792089237316195423570985008687907853269984665640564039457584007913129639935", "unlimited": true, "spenderKnown": false, "deadline": 4102444800 }],
+      "expect": { "verdict": "block", "codes": ["unlimited_approval", "spend_over_cap", "unknown_spender", "permit_signature", "permit_too_long"] }
+    },
+    {
+      "name": "allowlist mode block on unlisted contract",
+      "rules": { "allowlist": ["0x000000000022d473030f116ddee9f6b43ac78ba3"], "unlistedContract": "block" },
+      "facts": [{ "kind": "approve", "spender": "0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45", "amountRaw": "1000000", "amount": 1, "amountUsd": 1, "unlimited": false, "spenderKnown": true }],
+      "expect": { "verdict": "block", "codes": ["contract_not_allowlisted"] }
+    },
+    {
+      "name": "unknown calldata warns",
+      "facts": [{ "kind": "unknown", "target": "0x1111111111111111111111111111111111111111" }],
+      "expect": { "verdict": "warn", "codes": ["undecodable"] }
+    },
+    {
+      "name": "rules switched off allow everything",
+      "rules": { "blockUnlimitedApprovals": false, "blockApprovalForAll": false, "maxSpendUsd": null, "maxLeverage": null, "unlistedContract": "ignore", "permitSignatures": "ignore", "maxPermitDays": null },
+      "facts": [{ "kind": "approve", "spender": "0x3c1e5f0a9b7d42e8a6c0f19d2b4e7a8c5d6f0e91", "amountRaw": "1", "unlimited": true, "spenderKnown": true }],
+      "expect": { "verdict": "allow", "codes": [] }
+    },
+    {
+      "name": "multi-fact worst wins",
+      "facts": [
+        { "kind": "approve", "spender": "0x000000000022d473030f116ddee9f6b43ac78ba3", "amountRaw": "1", "amount": 1, "amountUsd": 1, "unlimited": false, "spenderKnown": true },
+        { "kind": "perp_open", "leverage": 25, "sizeUsd": 10000, "amountUsd": 400 }
+      ],
+      "expect": { "verdict": "block", "codes": ["leverage_over_cap"] }
+    }
+  ]
+}
