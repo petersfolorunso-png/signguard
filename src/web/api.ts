@@ -41,12 +41,29 @@ export class ApiError extends Error {
   constructor(msg: string, public status: number, public signIn = false, public retryAfterSecs?: number) { super(msg); }
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(path, { ...init, headers: { "content-type": "application/json", ...(init?.headers ?? {}) } });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    if (r.status === 401) localStorage.removeItem(HANDLE_KEY);
-    throw new ApiError(j.error ?? `Request failed (${r.status})`, r.status, !!j.signIn, j.retryAfterSecs);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** The host's "waking up / bad gateway" answers (free tier cold start). */
+const transient = (status: number) => status === 502 || status === 503 || status === 504;
+
+async function req<T>(path: string, init?: RequestInit, opts: { retries?: number; onWait?: () => void } = {}): Promise<T> {
+  let r: Response | null = null;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      r = await fetch(path, { ...init, headers: { "content-type": "application/json", ...(init?.headers ?? {}) } });
+      if (!transient(r.status) || attempt >= (opts.retries ?? 0)) break;
+    } catch {
+      if (attempt >= (opts.retries ?? 0)) throw new ApiError("Can't reach SignGuard right now. Check your connection and try again.", 0);
+    }
+    opts.onWait?.();
+    await sleep(Math.min(2000 * 2 ** attempt, 10000));
+  }
+  const res = r!;
+  const j = (res.headers.get("content-type") ?? "").includes("json") ? await res.json().catch(() => ({})) : {};
+  if (transient(res.status)) throw new ApiError("SignGuard is waking up. Give it a few seconds and try again.", res.status);
+  if (!res.ok) {
+    if (res.status === 401) localStorage.removeItem(HANDLE_KEY);
+    throw new ApiError(j.error ?? `Request failed (${res.status})`, res.status, !!j.signIn, j.retryAfterSecs);
   }
   return j as T;
 }
@@ -54,8 +71,9 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 const HANDLE_KEY = "signguard.handle";
 const RULES_KEY = "signguard.rules";
 
-export async function startSession(): Promise<Session> {
-  const s = await req<Session>("/api/session", { method: "POST", body: JSON.stringify({ handle: localStorage.getItem(HANDLE_KEY) ?? undefined }) });
+/** Retries for ~1 minute: a free-tier server may be cold-starting. */
+export async function startSession(onWait?: () => void): Promise<Session> {
+  const s = await req<Session>("/api/session", { method: "POST", body: JSON.stringify({ handle: localStorage.getItem(HANDLE_KEY) ?? undefined }) }, { retries: 7, onWait });
   if (s.handle) localStorage.setItem(HANDLE_KEY, s.handle);
   else localStorage.removeItem(HANDLE_KEY);
   return s;

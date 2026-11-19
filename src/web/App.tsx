@@ -15,9 +15,14 @@ export function App() {
   const [signIn, setSignIn] = useState<{ reason?: string; after?: (s: Session) => void } | null>(null);
   const [welcome, setWelcome] = useState<Session | null>(null);
 
-  useEffect(() => {
-    api.startSession().then(setSession).catch((e) => setErr(e.message));
-  }, []);
+  const [waking, setWaking] = useState(false);
+  const connect = () => {
+    setErr(null);
+    api.startSession(() => setWaking(true))
+      .then((s) => { setSession(s); setWaking(false); })
+      .catch((e) => { setWaking(false); setErr(e.message); });
+  };
+  useEffect(connect, []);
 
   const signedIn = !!session?.signedIn;
   const askSignIn = (reason?: string, after?: (s: Session) => void) => setSignIn({ reason, after });
@@ -64,7 +69,8 @@ export function App() {
         ))}
       </nav>
 
-      {err && <div className="alert">{err}</div>}
+      {waking && !session && <div className="ok">⏳ Waking up SignGuard (free server, can take ~30s)…</div>}
+      {err && !session && <div className="alert">{err} <button className="link" onClick={connect}>Retry</button></div>}
       {welcome && (
         <div className="ok welcome" role="status">
           🎉 {welcome.created ? "You're in! Your own" : "Welcome back — your"} <b>did:t3n</b> is ready{welcome.sponsored ? ` with ${welcome.sponsored} free T3 credits` : ""}.
