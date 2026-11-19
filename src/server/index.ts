@@ -11,6 +11,19 @@ const secrets = loadSecretsFile();
 if (secrets.warning) console.warn(`[signguard] WARNING: ${secrets.warning}`);
 const cfg = appConfig();
 
+// Durable state (identities, sponsorship ledger, usage) in the D1-backed store, when configured.
+let store: import("./remote-store.js").RemoteStore | null = null;
+if (process.env.SIGNGUARD_STORE_URL && process.env.SIGNGUARD_STORE_TOKEN) {
+  const { RemoteStore, useRemoteStore } = await import("./remote-store.js");
+  store = new RemoteStore(process.env.SIGNGUARD_STORE_URL, process.env.SIGNGUARD_STORE_TOKEN);
+  // Refuse to start on a load failure: starting empty could re-gift credits.
+  const docs = await store.load();
+  useRemoteStore(store, docs);
+  console.log(`[signguard] state store: ${Object.keys(docs).length} docs loaded`);
+} else if (cfg.mode === "real") {
+  console.warn("[signguard] WARNING: no SIGNGUARD_STORE_URL; state lives on local disk only");
+}
+
 let adapter: T3nAdapter;
 if (cfg.mode === "real") {
   const { RealT3n } = await import("./t3n/real.js");
@@ -49,6 +62,13 @@ if (existsSync(dist)) {
 const server = app.listen(cfg.port, () => {
   console.log(`[signguard] http://localhost:${cfg.port}  mode=${cfg.mode} login=${adapter.loginMethod}${cfg.mode === "mock" ? ` (missing for real T3N: ${cfg.missing.join(", ")})` : ""}  secrets=${secrets.loaded ? "loaded" : "none"}`);
 });
-const stop = () => { usage.flush(); server.close(() => process.exit(0)); };
+const stop = () => {
+  usage.flush();
+  server.close(async () => {
+    await store?.drain();
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(0), 8000).unref();
+};
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);

@@ -257,14 +257,24 @@ export class RealT3n implements T3nAdapter {
         if (!/already/i.test(String((e as Error)?.message ?? e))) throw e;
       }
       rec.member = true;
-      this.ids.save(true);
+      await this.ids.persist();
     }
-    await client.fundAgent(did, toBaseUnits(amount), { note: "signguard user sponsorship" });
+    // Record the gift durably *before* sending it, so a crash/restart can never
+    // re-gift (worst case a gift is recorded but not sent; the user can top up).
     rec.sponsored = (rec.sponsored ?? 0) + amount;
     b.spent += amount;
     b.total += amount;
-    this.ids.save(true);
-    this.budget.save(true);
+    await Promise.all([this.ids.persist(), this.budget.persist()]);
+    try {
+      await client.fundAgent(did, toBaseUnits(amount), { note: "signguard user sponsorship" });
+    } catch (e) {
+      // T3N refused the transfer: undo the record so the user isn't stuck.
+      rec.sponsored = (rec.sponsored ?? 0) - amount || undefined;
+      b.spent -= amount;
+      b.total -= amount;
+      await Promise.all([this.ids.persist(), this.budget.persist()]).catch(() => {});
+      throw e;
+    }
     return true;
   }
 
