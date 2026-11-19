@@ -74,13 +74,27 @@ interface IdentityRecord {
   hasRules?: boolean;
   member?: boolean;
   sponsored?: number;
+  sponsorError?: string;
   createdAt: number;
 }
 
 type WasmComponent = Awaited<ReturnType<typeof loadWasmComponent>>;
 
+/** Turn known T3N refusals into something a user/operator can act on. */
+export function explainT3nError(e: unknown): string {
+  const m = String((e as Error)?.message ?? e);
+  if (/can't attribute a non-user|does not exist/i.test(m))
+    return "T3N only lets an org add *registered* users (email-verified via user-upsert); this wallet-only identity isn't one yet, so it can't be sponsored credits.";
+  if (/insufficient.?credit/i.test(m)) return "Not enough T3N credits for this call.";
+  if (/daily T3N credit budget/.test(m)) return m;
+  return `T3N refused the call: ${m.replace(/t3n_key_\S+/g, "<redacted>").slice(0, 200)}`;
+}
+
 export class RealT3n implements T3nAdapter {
   readonly mode = "real" as const;
+  get requiresRulesBeforeCheck() {
+    return this.cfg.userMode === "delegated";
+  }
   private wasm: Promise<WasmComponent> | null = null;
   private trust: ReturnType<typeof resolveTrustAnchor> | null = null;
   private sessions = new Map<string, { client: T3nClient; did: string; at: number }>();
@@ -183,7 +197,13 @@ export class RealT3n implements T3nAdapter {
       return await fn();
     } catch (e) {
       if (!/insufficient.?credit/i.test(String((e as Error)?.message ?? e))) throw e;
-      if (!(await this.sponsor(rec))) throw new Error("This identity has used its free T3N credits");
+      let ok: boolean;
+      try {
+        ok = await this.sponsor(rec);
+      } catch (se) {
+        throw new Error(explainT3nError(se));
+      }
+      if (!ok) throw new Error("This identity has used its free T3N credits");
       return await fn();
     }
   }
@@ -200,7 +220,13 @@ export class RealT3n implements T3nAdapter {
     this.ids.save(true);
     this.sessions.set(handle, { ...s, at: Date.now() });
     // New DIDs start at 0 credits (verified on testnet), so sponsor up front.
-    await this.sponsor(fresh);
+    // Don't fail the session if T3N refuses; check() surfaces a clear error.
+    try {
+      await this.sponsor(fresh);
+    } catch (e) {
+      fresh.sponsorError = explainT3nError(e);
+      this.ids.save(true);
+    }
     return { did: s.did, created: true };
   }
 

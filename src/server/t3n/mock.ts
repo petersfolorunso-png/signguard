@@ -18,6 +18,7 @@ const MOCK_AGENT = "did:t3n:mock-agent-signguard";
 
 export class MockT3n implements T3nAdapter {
   readonly mode = "mock" as const;
+  readonly requiresRulesBeforeCheck = false;
   private file: JsonFile<MockState>;
 
   constructor(path: string) {

@@ -19,9 +19,11 @@ if (cfg.mode === "real") {
     devKey: process.env.T3N_API_KEY!,
     orgDid: process.env.T3N_ORG_DID,
     userMode: process.env.T3N_USER_MODE === "delegated" ? "delegated" : "self",
-    userCredits: Number(process.env.SIGNGUARD_USER_CREDITS ?? 5),
-    userCreditCap: Number(process.env.SIGNGUARD_USER_CREDIT_CAP ?? 25),
-    dailyBudget: Number(process.env.SIGNGUARD_DAILY_CREDIT_BUDGET ?? 1000),
+    // Measured on testnet 2026-11-19: check ≈ 40 credits, set-rules ≈ 90.
+    // 100 = ~2 checks on default rules; cap 300 = rules save + ~5 checks.
+    userCredits: Number(process.env.SIGNGUARD_USER_CREDITS ?? 100),
+    userCreditCap: Number(process.env.SIGNGUARD_USER_CREDIT_CAP ?? 300),
+    dailyBudget: Number(process.env.SIGNGUARD_DAILY_CREDIT_BUDGET ?? 1500),
     agentApiKey: process.env.T3N_AGENT_API_KEY,
     agentDid: process.env.T3N_AGENT_DID,
     contract: process.env.T3N_CONTRACT!,

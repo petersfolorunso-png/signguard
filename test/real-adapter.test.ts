@@ -79,7 +79,27 @@ describe("RealT3n (self mode)", () => {
   it("daily budget stops sponsorship", async () => {
     const t = make({ userCredits: 5, dailyBudget: 7 });
     await t.ensureIdentity("c".repeat(32));
-    await expect(t.ensureIdentity("d".repeat(32))).rejects.toThrow(/daily T3N credit budget/);
+    const second = await t.ensureIdentity("d".repeat(32)); // session still works…
+    expect(second.created).toBe(true);
+    await expect(t.check("d".repeat(32), [])).rejects.toThrow(/daily T3N credit budget/); // …but no free credits
+  });
+
+  it("explains T3N's 'non-user' refusal instead of failing the session", async () => {
+    const t = make();
+    const orig = (await import("@terminal3/t3n-sdk")).T3nClient.prototype as any;
+    const add = orig.addOrganisationMember;
+    orig.addOrganisationMember = async () => { throw new Error("RPC Error: input: user_did abc does not exist — can't attribute a non-user"); };
+    try {
+      const h = "e".repeat(32);
+      const id = await t.ensureIdentity(h);
+      expect(id.created).toBe(true);
+      await expect(t.check(h, [])).rejects.toThrow(/registered\* users|registered/);
+    } finally { orig.addOrganisationMember = add; }
+  });
+
+  it("self mode does not require saving rules before a check", () => {
+    expect(make().requiresRulesBeforeCheck).toBe(false);
+    expect(make({ userMode: "delegated", agentApiKey: "k", agentDid: "did:t3n:a" }).requiresRulesBeforeCheck).toBe(true);
   });
 
   it("refuses to start without an org in self mode", () => {

@@ -46,6 +46,12 @@ export interface ActivityRow {
 
 export interface T3nAdapter {
   readonly mode: "mock" | "real";
+  /**
+   * True when check() needs rules saved first (delegated mode: saving also
+   * grants the agent). Otherwise the TEE falls back to default rules, which
+   * saves a ~90-credit set-rules call for users who never customise.
+   */
+  readonly requiresRulesBeforeCheck: boolean;
   /** Get (or mint on first use) the user's did:t3n for an opaque browser handle. */
   ensureIdentity(handle: string): Promise<Identity>;
   /** Store the user's private rules in their T3N vault (self call) and grant our agent `check`. */

@@ -71,9 +71,13 @@ The policy returns only **allow / warn / block** plus reason codes
   credits (`fundAgent`, which accepts human org members). The user's own session
   then calls `set-rules` and `check` as self calls (no grant needed), so **each
   user DID burns its own credits** — exactly what the grant measures. Caps:
-  `SIGNGUARD_USER_CREDITS` (5), `SIGNGUARD_USER_CREDIT_CAP` (25 per user),
-  `SIGNGUARD_DAILY_CREDIT_BUDGET` (1000/day). On `InsufficientCredit` the adapter
-  tops up once within the caps and retries.
+  `SIGNGUARD_USER_CREDITS` (100), `SIGNGUARD_USER_CREDIT_CAP` (300 per user),
+  `SIGNGUARD_DAILY_CREDIT_BUDGET` (1500/day). On `InsufficientCredit` the adapter
+  tops up once within the caps and retries. Users who never customise rules skip
+  `set-rules` entirely (the TEE falls back to defaults).
+  **Open issue:** T3N only lets an org add *registered* users (email-verified via
+  `user-upsert`), so wallet-only burner DIDs can't be sponsored yet — see
+  "Measured costs & onboarding" below.
 * **Delegated mode (optional, `T3N_USER_MODE=delegated`)** — the user grants an
   org-owned SignGuard agent exactly one function (`check`) and the agent pays.
   Not the default: the grant is a `tee:user` call that testnet charged ~30 credits
@@ -85,6 +89,22 @@ The policy returns only **allow / warn / block** plus reason codes
 The policy logic exists twice — `src/core/rules.ts` (mock mode, tests) and
 `contracts/signguard-policy/src/logic.rs` (the TEE) — and **both are tested against the
 same vectors** in `test-vectors/policy.json`.
+
+## Measured costs & onboarding (testnet, 2026-11-19)
+
+| Call (real TEE contract `z:…:signguard` v0.1.0) | Credits |
+| --- | --- |
+| `set-rules` (self call, writes private map) | ≈ 90 |
+| `check` (self call, reads map, returns verdict) | ≈ 40 |
+| One-time setup: create org + register 213 KB WASM + create map | ≈ 1,670 |
+| Handshake / authenticate / `getBalance` / `getActivityLog` / `getContractVersion` | 0 |
+| `tee:user` read (`getMemberDelegation`) | ≈ 30, and refused for a 0-credit DID ("required" 10,000) |
+
+A fresh wallet-key DID authenticates for free but has 0 credits, and
+`addOrganisationMember` refuses it ("can't attribute a non-user") until it is a
+registered user (email-verified `user-upsert`). Options under evaluation: email-OTP
+sign-in per user, a per-visitor org-owned agent DID, or T3-sponsored onboarding.
+`npm run t3n:measure -- --yes` re-measures set-rules/check costs on the developer DID.
 
 ## Privacy model
 

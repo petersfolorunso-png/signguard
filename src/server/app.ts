@@ -85,7 +85,7 @@ export function createApp(deps: AppDeps) {
       if (!tx) return res.status(404).json({ error: "Couldn't find that tx hash on Ethereum, Base, Arbitrum, Optimism, Polygon or BNB Chain." });
       decoded = { ...decode(JSON.stringify(tx), { prices }), source: "hash", hash: decoded.hash };
     }
-    if (!(await deps.adapter.hasRules(handle))) await deps.adapter.saveRules(handle, DEFAULT_RULES);
+    if (deps.adapter.requiresRulesBeforeCheck && !(await deps.adapter.hasRules(handle))) await deps.adapter.saveRules(handle, DEFAULT_RULES);
     const { did } = await deps.adapter.ensureIdentity(handle);
     const outcome = await deps.adapter.check(handle, decoded.facts.map(toPolicyFacts));
     deps.usage.record(did, outcome.verdict, decoded.source, decoded.facts.map((f) => f.kind), outcome.credits);
