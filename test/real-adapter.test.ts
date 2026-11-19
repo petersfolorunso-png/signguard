@@ -87,13 +87,20 @@ describe("RealT3n email sign-in", () => {
     expect(done.sponsored).toBe(5);
     expect(done.handle).toMatch(/^[a-f0-9]{32}$/);
     expect(calls.map((c) => c.fn)).toEqual(["authenticate:email", "submitUserInput", "addOrganisationMember", "fundAgent", "addAuthMethod"]);
-    expect((calls[1].args[1] as any).organisationDid).toBe("org"); // bare hex, no did:t3n: prefix (T3N wants 40 hex)
+    expect((calls[1].args[1] as any).organisationDid).toBe("org");
+    expect((calls[1].args[1] as any).profile).toEqual({ first_name: "SignGuard", last_name: "User" }); // T3N requires both // bare hex, no did:t3n: prefix (T3N wants 40 hex)
     expect(calls[2].args).toEqual(["did:t3n:org", done.did]);
     expect(await t.isSignedIn(done.handle)).toBe(true);
     await t.saveRules(done.handle, RULES);
     const r = await t.check(done.handle, [{ kind: "approve", unlimited: true }]);
     expect(r.verdict).toBe("block");
     expect(calls.filter((c) => c.fn.startsWith("exec:")).map((c) => c.args[0])).toEqual([done.did, done.did]);
+  });
+
+  it("passes the visitor's optional name to user-upsert", async () => {
+    const t = make({ loginMethod: "email" });
+    await t.verifyEmailLogin((await t.startEmailLogin("ivy@example.com")).pendingId, GOOD_CODE, "Ivy  Ada Okafor");
+    expect((calls.find((c) => c.fn === "submitUserInput")!.args[1] as any).profile).toEqual({ first_name: "Ivy", last_name: "Ada Okafor" });
   });
 
   it("server never persists the email address", async () => {

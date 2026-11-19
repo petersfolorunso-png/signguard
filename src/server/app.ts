@@ -102,7 +102,7 @@ export function createApp(deps: AppDeps) {
   app.post("/api/auth/email/verify", wrap(async (req, res) => {
     if (!email) throw new UserFacingError("Email sign-in is off on this server.", 404);
     gate(verifyPerIp, req.ip ?? "?", "Too many attempts.");
-    const done = await deps.adapter.verifyEmailLogin(String(req.body?.pendingId ?? ""), String(req.body?.code ?? ""));
+    const done = await deps.adapter.verifyEmailLogin(String(req.body?.pendingId ?? ""), String(req.body?.code ?? ""), req.body?.name ? String(req.body.name).slice(0, 120) : undefined);
     deps.usage.identity(done.did);
     res.json({ signedIn: true, ...done, hasRules: await deps.adapter.hasRules(done.handle), loginMethod: "email", mode: deps.adapter.mode });
   }));

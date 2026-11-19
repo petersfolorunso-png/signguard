@@ -19,6 +19,18 @@ export function normalizeCode(raw: unknown): string {
   return code;
 }
 
+/**
+ * T3N's user-upsert requires first_name + last_name (live testnet refused an empty
+ * profile). The visitor may give a name; otherwise a neutral placeholder is used.
+ */
+export function profileNames(raw?: unknown): { first_name: string; last_name: string } {
+  const parts = String(raw ?? "").replace(/[^\p{L}\p{M}' .-]/gu, "").trim().split(/\s+/).filter(Boolean).slice(0, 6);
+  if (!parts.length) return { first_name: "SignGuard", last_name: "User" };
+  const first = parts[0].slice(0, 60);
+  const last = parts.slice(1).join(" ").slice(0, 60) || "-";
+  return { first_name: first, last_name: last };
+}
+
 /** Tiny in-memory sliding-window limiter (per key). */
 export class RateLimiter {
   private hits = new Map<string, number[]>();

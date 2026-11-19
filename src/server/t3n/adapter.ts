@@ -83,7 +83,7 @@ export interface T3nAdapter {
   /** Email sign-in step 1: T3N emails a one-time code (mock: returns demoCode). */
   startEmailLogin(email: string): Promise<EmailLoginStart>;
   /** Email sign-in step 2: verify the code, register the user, add to org + sponsor credits. */
-  verifyEmailLogin(pendingId: string, code: string): Promise<EmailLoginDone>;
+  verifyEmailLogin(pendingId: string, code: string, name?: string): Promise<EmailLoginDone>;
   /** Is this handle signed in (resumable) right now? */
   isSignedIn(handle: string): Promise<boolean>;
   readonly mode: "mock" | "real";

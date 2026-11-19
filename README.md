@@ -128,16 +128,19 @@ live test (below).
 simulates the email flow: nothing is sent, the code is shown on screen
 ("Demo code: 123456"), and the same email maps to the same mock DID.
 
-### First live test (needs Mari's OK + a chosen inbox)
+### Live test (testnet, 2026-11-19, one real inbox)
 
-With the real env loaded (`npm run build && npm start`, log shows `mode=real login=email`):
-open the app → "Try a scary tx" (preview) → "Sign in & check privately" → enter the
-chosen inbox → type the emailed code. Expect: welcome banner with "100 free T3
-credits", the verdict re-runs as "Verdict from T3N enclave", and `/api/status` notes
-show the org/contract. Then seal custom rules once and run one more check. Costs:
-≈ 100 credits sponsored + whatever the user spends (≈ 90 rules + ≈ 40 per check)
-from the user's sponsorship; registration itself should cost 0. Verify afterwards:
-`npm run export:dids` lists the DID, and the org activity log has the `check` rows.
+Passed end to end: email code → `user-upsert` → org attribution → 100-credit gift →
+device key linked → `set-rules` → `check` (block, from the T3N enclave) → listed by
+`npm run export:dids` and in the org activity log (`check`, `sg_op=check`).
+
+* **Registration is free for the user:** `user-upsert` succeeded while the new DID had 0 credits (funding comes after).
+* **Profile:** T3N requires `first_name` + `last_name`; an empty profile is refused. The sign-in sheet has an optional "Your name" field; otherwise `SignGuard User` is used.
+* **`organisation_did`** in `user-upsert` must be the bare 40-hex id (no `did:t3n:` prefix).
+* **Org side:** `addOrganisationMember` (logged as `user-add-organisation-attribution` + `org-profile-grant-ensure`) + `fund-agent` cost the admin ≈ 150 credits for a 100-credit gift (≈ 50 overhead per new user).
+* **User side:** `set-rules` + `check` used the full 100 gift (balance 0 afterwards); the next check triggers the one-time top-up within the cap.
+* **Device key:** a fresh process signed in with the linked device key and got the same DID — no second email.
+* Codes **expire in about 1 minute**; once a code is redeemed, post-login failures can be retried with the same code (no new email).
 
 ## Measured costs & onboarding (testnet, 2026-11-19)
 
@@ -168,7 +171,7 @@ DID's `user-upsert` attempt was not refused for credits (see "Sign-in").
 
 ```bash
 npm install
-npm test               # 79 TS tests (decoder, policy vectors, API, email sign-in, real adapter w/ mocked SDK)
+npm test               # 82 TS tests (decoder, policy vectors, API, email sign-in, real adapter w/ mocked SDK)
 npm run test:contract  # Rust TEE logic against the same vectors
 npm run dev            # API :8787 + web :5173 (mock T3N)
 SIGNGUARD_LOGIN=email npm run dev   # mock, with the email sign-in flow (code shown on screen)

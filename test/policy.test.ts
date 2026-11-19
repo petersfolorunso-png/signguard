@@ -31,3 +31,12 @@ describe("normalizeRules", () => {
     expect(normalizeRules({ maxSpendUsd: "" as any }).maxSpendUsd).toBeNull();
   });
 });
+
+import { profileNames } from "../src/server/t3n/email";
+describe("profileNames", () => {
+  it("defaults, splits and sanitises", () => {
+    expect(profileNames()).toEqual({ first_name: "SignGuard", last_name: "User" });
+    expect(profileNames("Cher")).toEqual({ first_name: "Cher", last_name: "-" });
+    expect(profileNames("  Mari <script> Ojo ")).toEqual({ first_name: "Mari", last_name: "script Ojo" });
+  });
+});

@@ -359,6 +359,7 @@ function Select({ label, value, onChange }: { label: string; value: string; onCh
 function SignInSheet({ mode, reason, onClose, onDone }: { mode: "mock" | "real"; reason?: string; onClose: () => void; onDone: (s: Session) => void }) {
   const [step, setStep] = useState<"email" | "code">("email");
   const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [pending, setPending] = useState<api.EmailStart | null>(null);
   const [busy, setBusy] = useState(false);
@@ -396,7 +397,7 @@ function SignInSheet({ mode, reason, onClose, onDone }: { mode: "mock" | "real";
     if (!pending) return;
     setBusy(true); setErr(null);
     try {
-      onDone(await api.emailVerify(pending.pendingId, code.trim()));
+      onDone(await api.emailVerify(pending.pendingId, code.trim(), name.trim()));
     } catch (ex) {
       const ae = ex as api.ApiError;
       setErr(ae.message);
@@ -419,6 +420,7 @@ function SignInSheet({ mode, reason, onClose, onDone }: { mode: "mock" | "real";
             <h2 id="signin-h">Get your private vault</h2>
             <p className="muted">{reason ?? "Your rules live under your own did:t3n identity on Terminal 3."} Just your email — no wallet, no seed phrase, free.</p>
             <input className="big-input" type="email" inputMode="email" autoComplete="email" autoFocus required placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} aria-label="Email" />
+            <input className="big-input small-input" autoComplete="name" placeholder="Your name (optional)" value={name} maxLength={80} onChange={(e) => setName(e.target.value)} aria-label="Name (optional)" />
             <button className="primary" disabled={busy || !email.includes("@") || cooldown > 0}>
               {busy ? <span className="spin" /> : "✉️"} {cooldown > 0 ? `Try again in ${cooldown}s` : busy ? "Sending…" : "Email me a code"}
             </button>

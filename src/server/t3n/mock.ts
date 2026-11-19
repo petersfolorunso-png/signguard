@@ -46,7 +46,7 @@ export class MockT3n implements T3nAdapter {
     return { pendingId, expiresInSec: PENDING_TTL_SECS, demoCode: code };
   }
 
-  async verifyEmailLogin(pendingId: string, rawCode: string): Promise<EmailLoginDone> {
+  async verifyEmailLogin(pendingId: string, rawCode: string, _name?: string): Promise<EmailLoginDone> {
     const code = normalizeCode(rawCode);
     const p = this.pending.get(String(pendingId));
     if (!p || p.expires < Date.now()) {

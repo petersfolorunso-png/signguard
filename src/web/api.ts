@@ -65,8 +65,8 @@ export async function startSession(): Promise<Session> {
 export const emailStart = (email: string) => req<EmailStart>("/api/auth/email/start", { method: "POST", body: JSON.stringify({ email }) });
 
 /** Email sign-in step 2: verify the code -> your own registered did:t3n. */
-export async function emailVerify(pendingId: string, code: string): Promise<Session> {
-  const s = await req<Session>("/api/auth/email/verify", { method: "POST", body: JSON.stringify({ pendingId, code }) });
+export async function emailVerify(pendingId: string, code: string, name?: string): Promise<Session> {
+  const s = await req<Session>("/api/auth/email/verify", { method: "POST", body: JSON.stringify({ pendingId, code, name: name || undefined }) });
   if (s.handle) localStorage.setItem(HANDLE_KEY, s.handle);
   return s;
 }

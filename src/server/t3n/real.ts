@@ -39,7 +39,7 @@ import {
 import type { Rules, TxFacts, Verdict, Hit, ReasonCode } from "../../core/types.js";
 import { SignInRequired, UserFacingError } from "./adapter.js";
 import type { ActivityRow, AdapterStatus, CheckOutcome, EmailLoginDone, EmailLoginStart, Identity, LoginMethod, T3nAdapter } from "./adapter.js";
-import { normalizeCode, normalizeEmail, PENDING_TTL_SECS } from "./email.js";
+import { normalizeCode, normalizeEmail, PENDING_TTL_SECS, profileNames } from "./email.js";
 import { JsonFile } from "../jsonfile.js";
 
 /**
@@ -326,7 +326,7 @@ export class RealT3n implements T3nAdapter {
    * attributed to our org), add the DID to the org + sponsor credits, then link
    * the device key so the browser can resume later without email.
    */
-  async verifyEmailLogin(pendingId: string, rawCode: string): Promise<EmailLoginDone> {
+  async verifyEmailLogin(pendingId: string, rawCode: string, name?: string): Promise<EmailLoginDone> {
     const code = normalizeCode(rawCode);
     const p = this.pending.get(String(pendingId));
     if (!p || p.expires < Date.now()) throw new UserFacingError("That code expired. Request a new one.", 410);
@@ -353,7 +353,7 @@ export class RealT3n implements T3nAdapter {
     //    non-user, so surface it clearly.
     if (!drec.registered) {
       try {
-        await p.client.submitUserInput({ profile: {}, ...(this.cfg.orgDid ? { organisationDid: didHex(this.cfg.orgDid) } : {}) });
+        await p.client.submitUserInput({ profile: profileNames(name), ...(this.cfg.orgDid ? { organisationDid: didHex(this.cfg.orgDid) } : {}) });
       } catch (e) {
         const m = String((e as Error)?.message ?? e);
         if (/insufficient.?credit/i.test(m)) throw new UserFacingError("Terminal 3 wants credits to register new users, and SignGuard can only fund registered users. We're on it — please try again later.", 503);
